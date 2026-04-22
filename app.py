@@ -9,13 +9,17 @@ Two modes:
 """
 from __future__ import annotations
 
+import base64
 import datetime
 import io
+import math
+import struct
 from typing import Optional
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from data_gen import generate_flight_csv, load_passengers_from_df
@@ -48,10 +52,44 @@ _DEFAULTS: dict = {
     "_go_to_gate": False,
     "sim_result": None,
     "sweep_results": None,
+    "gate_audio_enabled": False,
+    "gate_audio_last_slot": -1,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
+
+# ---------------------------------------------------------------------------
+# Audio chime (computed once; cached across reruns)
+# ---------------------------------------------------------------------------
+
+@st.cache_resource
+def _chime_html() -> str:
+    """Return an HTML <audio autoplay> snippet with a soft A5+E6 chime (PCM WAV)."""
+    sr, dur = 8000, 0.35
+    n = int(sr * dur)
+    samples = [
+        max(-32767, min(32767, int(
+            math.exp(-6 * i / sr) * 32767
+            * (0.5 * math.sin(2 * math.pi * 880 * i / sr)
+               + 0.3 * math.sin(2 * math.pi * 1320 * i / sr))
+        )))
+        for i in range(n)
+    ]
+    data = struct.pack(f"<{n}h", *samples)
+    hdr = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 36 + len(data), b"WAVE",
+        b"fmt ", 16, 1, 1, sr, sr * 2, 2, 16,
+        b"data", len(data),
+    )
+    b64 = base64.b64encode(hdr + data).decode()
+    return (
+        f"<audio autoplay style='display:none'>"
+        f"<source src='data:audio/wav;base64,{b64}' type='audio/wav'>"
+        f"</audio>"
+    )
+
 
 # Honour deferred mode switch set by the Start Gate Mode button.
 # Must run BEFORE any widget is rendered so the radio index is correct.
@@ -243,7 +281,7 @@ def render_planner() -> None:
             st.subheader("Manifest preview")
             st.dataframe(
                 st.session_state.manifest_df,
-                use_container_width=True,
+                width="stretch",
                 height=280,
             )
 
@@ -258,7 +296,7 @@ def render_planner() -> None:
         with col_l:
             st.subheader("Boarding schedule")
             df: pd.DataFrame = st.session_state.schedule_df
-            st.dataframe(df, use_container_width=True, height=480)
+            st.dataframe(df, width="stretch", height=480)
 
             csv_bytes = df.to_csv(index=False).encode("utf-8")
             st.download_button(
@@ -279,7 +317,7 @@ def render_planner() -> None:
         with col_r:
             st.subheader("Seat map")
             fig = draw_seat_map(st.session_state.flight)
-            st.pyplot(fig, use_container_width=True)
+            st.pyplot(fig, width="stretch")
             plt.close(fig)
 
         st.divider()
@@ -360,9 +398,23 @@ def render_gate() -> None:
 
     # Live seat map
     with st.expander("🗺  Seat map", expanded=True):
+        _tog_col, _ = st.columns([1, 5])
+        with _tog_col:
+            st.toggle(
+                "🔊 Audio cues",
+                key="gate_audio_enabled",
+                help="Play a soft chime whenever the boarding call advances to the next slot.",
+            )
         fig = draw_seat_map(st.session_state.flight, gate_session=session)
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
         plt.close(fig)
+
+    # Inject chime when the slot index has just advanced
+    if st.session_state.gate_audio_enabled and not session.is_complete:
+        _cur = session.current_slot_index
+        if st.session_state.gate_audio_last_slot != _cur:
+            st.session_state.gate_audio_last_slot = _cur
+            st.markdown(_chime_html(), unsafe_allow_html=True)
 
 
 def _render_current_call(session: GateSession) -> None:
@@ -468,6 +520,214 @@ def _no_shows(session: GateSession):
 
 
 # ---------------------------------------------------------------------------
+# Boarding animation helpers
+# ---------------------------------------------------------------------------
+
+# Aisle gap (in seat-width units) inserted before these column indices.
+_AISLE_BEFORE: dict[int, dict[int, float]] = {
+    4:  {2: 0.8},                  # 2+2
+    6:  {3: 0.8},                  # 3+3
+    8:  {2: 0.8, 6: 0.8},          # 2+4+2
+    9:  {3: 0.8, 6: 0.8},          # 3+3+3
+    10: {3: 0.8, 7: 0.8},          # 3+4+3
+}
+
+
+def _column_x_positions(n_cols: int) -> list:
+    """Return x-axis positions for seat columns, inserting aisle gaps."""
+    gaps = _AISLE_BEFORE.get(n_cols, {})
+    x, positions = 0.0, []
+    for i in range(n_cols):
+        x += gaps.get(i, 0.0)
+        positions.append(x)
+        x += 1.0
+    return positions
+
+
+def _make_boarding_animation(result: SimResult) -> go.Figure:
+    """
+    Build a Plotly animated seat-map figure that replays the simulation result.
+    Seats light up in phase colour as each passenger boards; no-shows stay red.
+    Animation plays entirely client-side — no Streamlit reruns needed.
+    """
+    flight = st.session_state.flight
+    cfg    = flight.plane_config
+    cols   = list(cfg.columns)
+    n_cols = len(cols)
+    n_rows = cfg.rows
+    col_x  = _column_x_positions(n_cols)
+
+    boarded_codes: set  = {r.seat_code for r in result.records}
+    board_time_of: dict = {r.seat_code: r.actual_board_at for r in result.records}
+    seat_type_of: dict  = {
+        p.seat.seat_code: p.seat.seat_type.value for p in flight.passengers
+    }
+
+    PHASE_COLOR = {"window": "#4A90D9", "middle": "#F59B00", "aisle": "#5CB85C"}
+    EMPTY  = "#E8E8E8"
+    NOSHOW = "#E74C3C"
+
+    # Build per-seat position arrays (fixed for all frames)
+    xs, ys, texts, symbols = [], [], [], []
+    seat_order: list = []
+    for p in flight.passengers:
+        col_upper = p.seat.column.upper()
+        if col_upper not in cols:
+            continue
+        ci = cols.index(col_upper)
+        xs.append(col_x[ci])
+        ys.append(n_rows + 1 - p.seat.row)   # row 1 at top
+        texts.append(f"{p.name}<br>{p.seat.seat_code}")
+        symbols.append("square" if p.seat.seat_code in boarded_codes else "x")
+        seat_order.append(p.seat.seat_code)
+
+    # Time range for animation
+    all_times = sorted(board_time_of.values())
+    if not all_times:
+        return go.Figure()
+    t_start  = all_times[0]
+    total_s  = max(1, (all_times[-1] - t_start).total_seconds())
+    N_FRAMES = 50
+    time_steps = [
+        t_start + datetime.timedelta(seconds=total_s * i / (N_FRAMES - 1))
+        for i in range(N_FRAMES)
+    ]
+
+    def _colors_at(t: datetime.datetime) -> list:
+        out = []
+        for code in seat_order:
+            if code not in boarded_codes:
+                out.append(NOSHOW)
+            elif board_time_of[code] <= t:
+                out.append(PHASE_COLOR[seat_type_of[code]])
+            else:
+                out.append(EMPTY)
+        return out
+
+    def _trace(colors: list) -> go.Scatter:
+        return go.Scatter(
+            x=xs, y=ys,
+            mode="markers",
+            marker=dict(
+                symbol=symbols,
+                color=colors,
+                size=9,
+                line=dict(width=0.5, color="#FFFFFF"),
+            ),
+            text=texts,
+            hoverinfo="text",
+            showlegend=False,
+        )
+
+    # Animation frames
+    frames = [
+        go.Frame(
+            data=[_trace(_colors_at(t))],
+            name=str(i),
+            layout=go.Layout(title=dict(
+                text=f"Elapsed: {int((t - t_start).total_seconds()) // 60}m "
+                     f"{int((t - t_start).total_seconds()) % 60:02d}s"
+            )),
+        )
+        for i, t in enumerate(time_steps)
+    ]
+
+    slider_steps = [
+        {
+            "args": [[f.name], {
+                "frame": {"duration": 0, "redraw": False},
+                "mode": "immediate",
+                "transition": {"duration": 0},
+            }],
+            "label": "",
+            "method": "animate",
+        }
+        for f in frames
+    ]
+
+    fig = go.Figure(
+        data=[_trace(_colors_at(time_steps[0]))],
+        frames=frames,
+    )
+
+    # Static legend traces (invisible points, legend only)
+    for color, label in [
+        ("#4A90D9", "Window"),
+        ("#F59B00", "Middle"),
+        ("#5CB85C", "Aisle"),
+        ("#E74C3C", "No-show"),
+        ("#E8E8E8", "Not yet boarded"),
+    ]:
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers",
+            marker=dict(color=color, symbol="square", size=9),
+            name=label, showlegend=True,
+        ))
+
+    fig.update_layout(
+        height=max(420, n_rows * 13),
+        title=dict(text="Elapsed: 0m 00s", x=0.5),
+        xaxis=dict(
+            tickvals=col_x, ticktext=cols,
+            title="Column",
+            range=[-0.6, col_x[-1] + 0.6],
+            zeroline=False, showgrid=False,
+        ),
+        yaxis=dict(
+            tickvals=[n_rows + 1 - r for r in
+                      range(1, n_rows + 1, max(1, n_rows // 10))],
+            ticktext=[str(r) for r in
+                      range(1, n_rows + 1, max(1, n_rows // 10))],
+            title="Row", range=[0, n_rows + 2],
+            zeroline=False, showgrid=False,
+        ),
+        plot_bgcolor="#F8F8F8",
+        paper_bgcolor="#FFFFFF",
+        margin=dict(l=60, r=20, t=80, b=70),
+        legend=dict(x=1.02, y=0.95, font=dict(size=10)),
+        updatemenus=[{
+            "type": "buttons",
+            "showactive": False,
+            "x": 0.0, "xanchor": "left",
+            "y": 1.10, "yanchor": "top",
+            "bgcolor": "#EFEFEF",
+            "bordercolor": "#CCCCCC",
+            "font": {"size": 12},
+            "buttons": [
+                {
+                    "label": "▶ Play",
+                    "method": "animate",
+                    "args": [None, {
+                        "frame": {"duration": 180, "redraw": False},
+                        "fromcurrent": True,
+                        "transition": {"duration": 0},
+                    }],
+                },
+                {
+                    "label": "⏸ Pause",
+                    "method": "animate",
+                    "args": [[None], {
+                        "frame": {"duration": 0, "redraw": False},
+                        "mode": "immediate",
+                        "transition": {"duration": 0},
+                    }],
+                },
+            ],
+        }],
+        sliders=[{
+            "active": 0,
+            "yanchor": "top", "xanchor": "left",
+            "currentvalue": {"visible": False},
+            "transition": {"duration": 0},
+            "pad": {"b": 10, "t": 50},
+            "len": 0.9, "x": 0.1, "y": 0,
+            "steps": slider_steps,
+        }],
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Simulation mode
 # ---------------------------------------------------------------------------
 
@@ -536,11 +796,27 @@ def render_simulation() -> None:
                 _render_single_result(result)
 
             st.divider()
+            # --- Optional animated boarding visualisation -----------------
+            show_viz = st.checkbox(
+                "📊  Show animated boarding visualisation",
+                value=False,
+                key="show_boarding_viz",
+                help=(
+                    "Animated seat map: seats light up as passengers board. "
+                    "Plays client-side — use ▶ Play or drag the timeline slider."
+                ),
+            )
+            if show_viz:
+                with st.spinner("Building animation…"):
+                    anim_fig = _make_boarding_animation(result)
+                st.plotly_chart(anim_fig, width="stretch")
+
+            st.divider()
             st.subheader("Passenger detail")
             df_rec = _records_to_df(result)
             st.dataframe(
                 df_rec.style.apply(_highlight_noshow, axis=1),
-                use_container_width=True,
+                width="stretch",
                 height=380,
             )
             st.download_button(
@@ -577,7 +853,7 @@ def render_simulation() -> None:
 
             st.divider()
             sweep_df = _sweep_to_df(results)
-            st.dataframe(sweep_df, use_container_width=True)
+            st.dataframe(sweep_df, width="stretch")
             st.download_button(
                 "⬇  Download sweep CSV",
                 data=sweep_df.to_csv(index=False).encode(),
@@ -639,7 +915,7 @@ def _render_single_result(r: SimResult) -> None:
     axes[1].set_title("Slot compliance")
 
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
     plt.close(fig)
 
 
@@ -672,7 +948,7 @@ def _render_sweep_charts(results: list) -> None:
     axes[2].set_title("Avg drift per passenger")
 
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True)
+    st.pyplot(fig, width="stretch")
     plt.close(fig)
 
     # Find tipping point: first rate where score < 80

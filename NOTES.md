@@ -104,4 +104,24 @@ cd "~\boarding_planner"
 - Export gate session events to CSV / PDF boarding report
 - Visualise late-arrival timeline (when each returner re-entered vs boarding clock)
 - Compare Steffen vs random vs back-to-front strategies in the Simulation sweep
-- Sound / audio cue for the current boarding call in Gate Mode
+
+## Implemented (April 2026)
+
+### Audio cue for Gate Mode (app.py)
+- `🔊 Audio cues` toggle inside the Seat map expander
+- Plays a soft A5+E6 chime (generated as PCM WAV via Web Audio) each time the
+  boarding call advances to the next slot
+- Chime is only fired when `gate_audio_last_slot` changes; cached via
+  `@st.cache_resource` so generation only happens once per server run
+- Injected via `st.markdown(..., unsafe_allow_html=True)` — no iframe overhead
+
+### Animated boarding visualisation for Simulation (app.py)
+- `📊 Show animated boarding visualisation` checkbox under the Single scenario result
+- Builds a Plotly animated seat-map figure (`_make_boarding_animation`):
+  - 50 animation frames spread across the full boarding timeline
+  - Seats light up in phase colour (window=blue, middle=orange, aisle=green) as
+    each passenger actually boards
+  - No-show seats (never boarded) shown as red ✕ throughout
+  - Play / Pause buttons + a timeline slider — all client-side, flicker-free
+  - Correct aisle gaps for all 9 aircraft layouts via `_column_x_positions`
+- `plotly>=5.18.0` added to requirements.txt
