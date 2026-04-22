@@ -25,7 +25,7 @@ import streamlit as st
 from data_gen import generate_flight_csv, load_passengers_from_df
 from gate import GateSession
 from models import BoardingStatus, Flight, PlaneConfig
-from scheduler import build_schedule
+from scheduler import build_schedule, SCHEDULE_EPOCH
 from simulate import run_simulation, run_sweep, SimResult
 
 # ---------------------------------------------------------------------------
@@ -130,9 +130,6 @@ with st.sidebar:
     st.divider()
     plane_label: str = st.selectbox("Aircraft", list(PLANE_OPTIONS.keys()))
     plane_config: PlaneConfig = PLANE_OPTIONS[plane_label]
-
-    boarding_time = st.time_input("Boarding start", value=datetime.time(14, 0))
-    boarding_start_dt = datetime.datetime.combine(datetime.date.today(), boarding_time)
 
     st.divider()
     if st.session_state.flight:
@@ -328,7 +325,7 @@ def render_planner() -> None:
                 p.scanned_at = None
             st.session_state.gate_session = GateSession(
                 flight=st.session_state.flight,
-                boarding_start=boarding_start_dt,
+                boarding_start=datetime.datetime.now(),
             )
             st.session_state._go_to_gate = True
             st.rerun()
@@ -341,11 +338,11 @@ def _load_flight(df: pd.DataFrame, flight_number: str) -> None:
         flight_number=flight_number,
         plane_config=plane_config,
         passengers=passengers,
-        departure=boarding_start_dt + datetime.timedelta(hours=1),
+        departure=None,
     )
     st.session_state.manifest_df = df
     st.session_state.flight = flight
-    st.session_state.schedule_df = build_schedule(flight, boarding_start_dt)
+    st.session_state.schedule_df = build_schedule(flight, SCHEDULE_EPOCH)
     st.session_state.gate_session = None
     st.session_state.sim_result = None
     st.session_state.sweep_results = None
@@ -464,7 +461,11 @@ def _render_upcoming(session: GateSession) -> None:
         names = ", ".join(p.name for p in slot)
         seats = ", ".join(p.seat.seat_code for p in slot)
         board_at = slot[0].board_at
-        time_str  = board_at.strftime("%H:%M:%S") if board_at else "—"
+        if board_at:
+            _e = int((board_at - session.boarding_start).total_seconds())
+            time_str = f"+{_e // 60}m {_e % 60:02d}s"
+        else:
+            time_str = "—"
         st.caption(f"**+{i}** &nbsp; {time_str} &nbsp; {names} — `{seats}`")
 
 
@@ -489,11 +490,15 @@ def _render_event_log(session: GateSession) -> None:
 def _render_late_arrivals(session: GateSession) -> None:
     st.subheader("Late arrivals")
     for p in _no_shows(session):
-        board_at = p.board_at.strftime("%H:%M:%S") if p.board_at else "—"
+        if p.board_at:
+            _e = int((p.board_at - session.boarding_start).total_seconds())
+            board_at_str = f"+{_e // 60}m {_e % 60:02d}s"
+        else:
+            board_at_str = "—"
         col_a, col_b = st.columns([3, 1])
         col_a.caption(
             f"**{p.name}** — `{p.seat.seat_code}` · "
-            f"slot {p.scheduled_slot} ({board_at})"
+            f"slot {p.scheduled_slot} ({board_at_str})"
         )
         with col_b:
             if st.button("🔔 Arrived", key=f"late_{p.passenger_id}"):
@@ -635,7 +640,7 @@ def _make_boarding_animation(result: SimResult) -> go.Figure:
     slider_steps = [
         {
             "args": [[f.name], {
-                "frame": {"duration": 0, "redraw": False},
+                "frame": {"duration": 0, "redraw": True},
                 "mode": "immediate",
                 "transition": {"duration": 0},
             }],
@@ -698,7 +703,7 @@ def _make_boarding_animation(result: SimResult) -> go.Figure:
                     "label": "▶ Play",
                     "method": "animate",
                     "args": [None, {
-                        "frame": {"duration": 180, "redraw": False},
+                        "frame": {"duration": 180, "redraw": True},
                         "fromcurrent": True,
                         "transition": {"duration": 0},
                     }],
@@ -1085,7 +1090,7 @@ def render_help() -> None:
         **Purpose:** Create a boarding schedule for a flight.
 
         **Steps:**
-        1. Select an **aircraft type** and **boarding start time** in the sidebar.
+        1. Select an **aircraft type** in the sidebar.
         2. In the **Flight Setup** tab, either:
            - Click **Generate** to create a random reproducible manifest
              (adjust group ratio and seed), or
@@ -1112,6 +1117,8 @@ def render_help() -> None:
         - The **event log** records every action with timestamps.
         - The **seat map** updates live: gold = current call, grey = boarded,
           red = no-show requeued.
+        - Enable **🔊 Audio cues** (inside the seat map expander) to hear a soft
+          chime whenever the boarding call advances to the next slot.
         - When all slots are complete, a summary screen is shown.
         """)
 
@@ -1124,6 +1131,8 @@ def render_help() -> None:
         - Set a **no-show rate** (fraction of passengers who miss their slot).
         - Run the simulation to see boarding time, time overhead vs baseline,
           average schedule drift, smoothness score, and per-passenger detail.
+        - Tick **📊 Show animated boarding visualisation** to replay the
+          simulated boarding frame-by-frame on an interactive seat map.
 
         **Sweep tab:**
         - Runs the simulation for every rate from 0 % to 80 % in configurable

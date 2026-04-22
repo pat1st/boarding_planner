@@ -25,6 +25,11 @@ BAGGAGE_SECONDS: dict = {
 # Minimum gap between slots (walk-up / aisle-clearing time)
 _GAP_SECONDS = 5
 
+# Fixed epoch used whenever we build a schedule outside a live gate session.
+# All displayed times are relative offsets from this point, so the absolute
+# date/hour is irrelevant — only the elapsed deltas matter.
+SCHEDULE_EPOCH = datetime.datetime(2000, 1, 1, 0, 0, 0)
+
 
 def slot_duration(passengers: List[Passenger]) -> int:
     """
@@ -57,10 +62,11 @@ def build_schedule(
         for p in slot:
             p.scheduled_slot = slot_idx
             p.board_at = current_time
+            _elapsed = int((current_time - boarding_start).total_seconds())
             records.append(
                 {
                     "slot": slot_idx,
-                    "board_at": current_time.strftime("%H:%M:%S"),
+                    "board_at": f"+{_elapsed // 60}m {_elapsed % 60:02d}s",
                     "passenger_id": p.passenger_id,
                     "name": p.name,
                     "seat": p.seat.seat_code,

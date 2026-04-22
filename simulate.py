@@ -25,7 +25,7 @@ from typing import List, Optional
 
 from gate import GateSession
 from models import BoardingStatus, Flight, PlaneConfig
-from scheduler import BAGGAGE_SECONDS, slot_duration
+from scheduler import BAGGAGE_SECONDS, SCHEDULE_EPOCH, slot_duration
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +72,16 @@ class SimResult:
 _ActualTimes = dict  # str → datetime.datetime
 
 def _deep_copy_flight(flight: Flight) -> Flight:
-    """Return a deep copy so repeated runs don't share mutable state."""
-    return copy.deepcopy(flight)
+    """Return a deep copy so repeated runs don't share mutable state.
+    All passenger statuses are reset to WAITING so the simulation always
+    starts from a clean slate, even if a gate session has partially boarded
+    the flight already.
+    """
+    f = copy.deepcopy(flight)
+    for p in f.passengers:
+        p.status = BoardingStatus.WAITING
+        p.scanned_at = None
+    return f
 
 
 def _phase_index(seat_type: str) -> int:
@@ -105,9 +113,7 @@ def run_simulation(
     late_max_slots        : maximum slot-delay before a no-show returns
     """
     if boarding_start is None:
-        boarding_start = datetime.datetime.combine(
-            datetime.date.today(), datetime.time(14, 0)
-        )
+        boarding_start = SCHEDULE_EPOCH
 
     rng = random.Random(seed)
 
