@@ -51,6 +51,7 @@ _DEFAULTS: dict = {
     "app_mode": "Planner",
     "_go_to_gate": False,
     "_go_to_sim": False,
+    "_run_demo": False,
     "sim_result": None,
     "sweep_results": None,
     "gate_audio_enabled": False,
@@ -101,6 +102,20 @@ if st.session_state._go_to_sim:
     st.session_state.app_mode = "Simulation"
     st.session_state.mode_radio = "Simulation"
     st.session_state._go_to_sim = False
+if st.session_state._run_demo:
+    st.session_state._run_demo = False
+    _dp   = PlaneConfig.a320()
+    _ddf  = generate_flight_csv(_dp, group_ratio=0.3, seed=42)
+    _dpax = load_passengers_from_df(_ddf, _dp)
+    _dflt = Flight("DEMO001", _dp, _dpax, None)
+    st.session_state.manifest_df  = _ddf
+    st.session_state.flight       = _dflt
+    st.session_state.schedule_df  = build_schedule(_dflt, SCHEDULE_EPOCH)
+    st.session_state.gate_session = None
+    st.session_state.sim_result   = run_simulation(_dflt, no_show_rate=0.20, seed=42)
+    st.session_state.sweep_results = None
+    st.session_state.show_boarding_viz = True   # pre-tick the animation checkbox
+    st.session_state._go_to_sim   = True        # navigate to Simulation
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -238,6 +253,48 @@ def draw_seat_map(
 # ---------------------------------------------------------------------------
 def render_planner() -> None:
     st.header("Flight Setup & Boarding Schedule")
+
+    # ── Quick Start guide ─────────────────────────────────────────────────
+    with st.expander(
+        "🚀  Quick Start — new here? Click to see how it works",
+        expanded=st.session_state.flight is None,
+    ):
+        st.markdown("""
+        Follow these **3 steps** to see the planner in action, or hit the
+        demo button at the bottom to run everything automatically.
+
+        | Step | What to do | Where |
+        |------|-----------|-------|
+        | **1** | Pick an aircraft in the sidebar (A320 is a good default) | Sidebar |
+        | **2** | Click **Generate** in the *Flight Setup* tab to create a random passenger manifest | Below |
+        | **3a** | Click **🚪 Start Gate Mode** to board passengers manually, one scan at a time | Flight Setup or Schedule tab |
+        | **3b** | Click **📊 Run Simulation** to auto-run boarding with no-shows and see robustness scores + animated replay | Flight Setup or Schedule tab |
+        | **3c** | In Simulation → switch to the **Sweep** tab to see how scores change across all no-show rates 0–80 % | Simulation mode |
+
+        **Tips:**
+        - In Simulation, tick **📊 Show animated boarding visualisation** after running to watch seats
+          light up phase-by-phase.
+        - In the Sweep tab, look for the **tipping point** — the no-show rate where the plan breaks down.
+        - The **Help** mode (sidebar) explains every metric and links to the original research.
+        """)
+        st.divider()
+        _qs_l, _qs_r = st.columns([1, 3])
+        with _qs_l:
+            if st.button(
+                "🎬  Run full demo for me",
+                type="primary",
+                help="Auto-generates an A320 flight, runs a 20 % no-show simulation, "
+                     "and opens Simulation mode with the animated replay ready to play.",
+            ):
+                st.session_state._run_demo = True
+                st.rerun()
+        with _qs_r:
+            st.caption(
+                "Generates a default A320 · 180-seat flight (seed 42, 30 % groups), "
+                "runs a 20 % no-show simulation, and opens Simulation mode with the "
+                "animated boarding replay pre-loaded. Takes about 2 seconds."
+            )
+
     tab_setup, tab_schedule = st.tabs(["✈  Flight Setup", "📋  Schedule"])
 
     # ---- Setup tab -------------------------------------------------------
