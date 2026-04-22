@@ -50,6 +50,7 @@ _DEFAULTS: dict = {
     "gate_session": None,
     "app_mode": "Planner",
     "_go_to_gate": False,
+    "_go_to_sim": False,
     "sim_result": None,
     "sweep_results": None,
     "gate_audio_enabled": False,
@@ -91,12 +92,15 @@ def _chime_html() -> str:
     )
 
 
-# Honour deferred mode switch set by the Start Gate Mode button.
-# Must run BEFORE any widget is rendered so the radio index is correct.
+# Honour deferred mode switches — must run BEFORE any widget is rendered.
 if st.session_state._go_to_gate:
     st.session_state.app_mode = "Gate Mode"
     st.session_state.mode_radio = "Gate Mode"
     st.session_state._go_to_gate = False
+if st.session_state._go_to_sim:
+    st.session_state.app_mode = "Simulation"
+    st.session_state.mode_radio = "Simulation"
+    st.session_state._go_to_sim = False
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -282,6 +286,44 @@ def render_planner() -> None:
                 height=280,
             )
 
+            st.divider()
+            st.markdown("#### ✅ Flight ready — what would you like to do next?")
+            _nc1, _nc2, _nc3 = st.columns(3, gap="large")
+
+            with _nc1:
+                st.markdown("**📋 Review Schedule**")
+                st.caption(
+                    "Open the **Schedule** tab above to inspect the full "
+                    "boarding sequence, see the phase seat map, and download the CSV."
+                )
+
+            with _nc2:
+                st.markdown("**🚪 Gate Mode** — Manual boarding")
+                st.caption(
+                    "Scan passengers through one by one, mark no-shows, handle "
+                    "late arrivals, and watch the live seat map update in real time."
+                )
+                if st.button("🚪 Start Gate Mode", type="primary", key="setup_gate_btn"):
+                    for p in st.session_state.flight.passengers:
+                        p.status = BoardingStatus.WAITING
+                        p.scanned_at = None
+                    st.session_state.gate_session = GateSession(
+                        flight=st.session_state.flight,
+                        boarding_start=datetime.datetime.now(),
+                    )
+                    st.session_state._go_to_gate = True
+                    st.rerun()
+
+            with _nc3:
+                st.markdown("**📊 Simulation** — Automated testing")
+                st.caption(
+                    "Stress-test the boarding plan with configurable no-show rates "
+                    "and measure smoothness scores without manual input."
+                )
+                if st.button("📊 Run Simulation", key="setup_sim_btn"):
+                    st.session_state._go_to_sim = True
+                    st.rerun()
+
     # ---- Schedule tab ----------------------------------------------------
     with tab_schedule:
         if st.session_state.schedule_df is None or st.session_state.flight is None:
@@ -318,17 +360,23 @@ def render_planner() -> None:
             plt.close(fig)
 
         st.divider()
-        if st.button("🚪  Start Gate Mode", type="primary"):
-            # Reset all passenger statuses for a clean session
-            for p in st.session_state.flight.passengers:
-                p.status = BoardingStatus.WAITING
-                p.scanned_at = None
-            st.session_state.gate_session = GateSession(
-                flight=st.session_state.flight,
-                boarding_start=datetime.datetime.now(),
-            )
-            st.session_state._go_to_gate = True
-            st.rerun()
+        _sched_btn1, _sched_btn2 = st.columns(2, gap="medium")
+        with _sched_btn1:
+            if st.button("🚪  Start Gate Mode", type="primary", key="sched_gate_btn"):
+                # Reset all passenger statuses for a clean session
+                for p in st.session_state.flight.passengers:
+                    p.status = BoardingStatus.WAITING
+                    p.scanned_at = None
+                st.session_state.gate_session = GateSession(
+                    flight=st.session_state.flight,
+                    boarding_start=datetime.datetime.now(),
+                )
+                st.session_state._go_to_gate = True
+                st.rerun()
+        with _sched_btn2:
+            if st.button("📊  Run Simulation", key="sched_sim_btn"):
+                st.session_state._go_to_sim = True
+                st.rerun()
 
 
 def _load_flight(df: pd.DataFrame, flight_number: str) -> None:
@@ -356,8 +404,9 @@ def render_gate() -> None:
     session: Optional[GateSession] = st.session_state.gate_session
     if session is None:
         st.warning(
-            "No active gate session.  "
-            "Go to **Planner → Schedule** and click *Start Gate Mode*."
+            "No active gate session. "
+            "Go to **Planner → Flight Setup**, generate or upload a flight, "
+            "then click **🚪 Start Gate Mode**."
         )
         return
 
@@ -695,12 +744,12 @@ def _make_boarding_animation(result: SimResult) -> go.Figure:
             "showactive": False,
             "x": 0.0, "xanchor": "left",
             "y": 1.10, "yanchor": "top",
-            "bgcolor": "#EFEFEF",
-            "bordercolor": "#CCCCCC",
-            "font": {"size": 12},
+            "bgcolor": "#1A73E8",
+            "bordercolor": "#1558B0",
+            "font": {"size": 13, "color": "#FFFFFF", "family": "Arial, sans-serif"},
             "buttons": [
                 {
-                    "label": "▶ Play",
+                    "label": "▶  Play",
                     "method": "animate",
                     "args": [None, {
                         "frame": {"duration": 180, "redraw": True},
@@ -709,7 +758,7 @@ def _make_boarding_animation(result: SimResult) -> go.Figure:
                     }],
                 },
                 {
-                    "label": "⏸ Pause",
+                    "label": "⏸  Pause",
                     "method": "animate",
                     "args": [[None], {
                         "frame": {"duration": 0, "redraw": False},
@@ -815,6 +864,11 @@ def render_simulation() -> None:
                 with st.spinner("Building animation…"):
                     anim_fig = _make_boarding_animation(result)
                 st.plotly_chart(anim_fig, width="stretch")
+                st.caption(
+                    "🔴 **Red ✕ seats** are passengers who never boarded — "
+                    "either permanent no-shows who didn't return to the gate, "
+                    "or late returners who missed the final boarding call."
+                )
 
             st.divider()
             st.subheader("Passenger detail")
