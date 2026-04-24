@@ -1278,9 +1278,9 @@ def render_help() -> None:
         **Why 10 % non-compliance matters so much:**  
         Steffen's own paper (2008) showed that even 10 % random swaps
         significantly increase mean boarding time.  Our simulation confirms
-        this — for a 180-seat A320 the smoothness score falls from 100 → ~57
-        at 10 % non-compliance.  This is the core practical limitation of
-        any highly-ordered boarding strategy.
+        this — for a 180-seat A320 the smoothness score falls from 100 → ~66
+        at 10 % non-compliance and to ~32 at 20 %.  This is the core practical
+        limitation of any highly-ordered boarding strategy.
         """)
 
     # ── References ────────────────────────────────────────────────────
