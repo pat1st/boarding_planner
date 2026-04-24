@@ -18,6 +18,7 @@ would board latest individually). The whole group boards together in that slot.
 from __future__ import annotations
 
 from collections import defaultdict
+from itertools import groupby
 from typing import Dict, List, Tuple
 
 from models import Flight, Passenger, SeatType
@@ -78,8 +79,17 @@ def compute_boarding_sequence(flight: Flight) -> List[List[Passenger]]:
 
     slots_with_keys: List[Tuple[Tuple, List[Passenger]]] = []
 
-    for p in solos:
-        slots_with_keys.append((_steffen_key(p, max_row), [p]))
+    # Group solo passengers by (phase, parity) into Steffen waves.
+    # Passengers in the same wave are 2 rows apart and stow baggage in
+    # parallel — they occupy the aisle simultaneously without blocking
+    # each other.  This is the core speed source of the Steffen method.
+    solos_sorted = sorted(solos, key=lambda p: _steffen_key(p, max_row)[:2])
+    for wave_key, wave_iter in groupby(
+        solos_sorted, key=lambda p: _steffen_key(p, max_row)[:2]
+    ):
+        wave = sorted(wave_iter, key=lambda p: -p.seat.row)  # back-to-front
+        sort_key = wave_key + (-wave[0].seat.row,)
+        slots_with_keys.append((sort_key, wave))
 
     for group_id, members in groups.items():
         slots_with_keys.append((_group_key(members, max_row), list(members)))

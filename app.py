@@ -141,7 +141,6 @@ with st.sidebar:
     mode: str = st.radio(
         "Mode",
         _APP_MODES,
-        index=_APP_MODES.index(st.session_state.app_mode),
         key="mode_radio",
     )
     st.session_state.app_mode = mode

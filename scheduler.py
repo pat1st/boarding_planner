@@ -25,6 +25,11 @@ BAGGAGE_SECONDS: dict = {
 # Minimum gap between slots (walk-up / aisle-clearing time)
 _GAP_SECONDS = 5
 
+# Per-person aisle-entry overhead for a Steffen wave.
+# Passengers in a wave are 2 rows apart so bin stowing is parallel;
+# this small constant represents each person walking to their row.
+_WAVE_ENTRY_SECONDS = 2
+
 # Fixed epoch used whenever we build a schedule outside a live gate session.
 # All displayed times are relative offsets from this point, so the absolute
 # date/hour is irrelevant — only the elapsed deltas matter.
@@ -35,14 +40,22 @@ def slot_duration(passengers: List[Passenger]) -> int:
     """
     Estimate how long (seconds) a boarding slot will occupy the aisle.
 
-    Solo:  baggage_time + gap
-    Group: heaviest member's time + 5 s per additional member + gap
-           (members stow partially in parallel at adjacent overhead bins)
+    Solo:        baggage_time + gap
+    Steffen wave (all solo pax, no group_id): max(baggage_times)
+                 + WAVE_ENTRY_SECONDS per additional person + gap.
+                 Passengers are 2 rows apart so bin stowing is parallel;
+                 the small per-person overhead is aisle-walk only.
+    Family group (shared group_id): max(baggage_times)
+                 + 5 s per additional member + gap.
+                 Members share an overhead bin zone so stowing is
+                 partially sequential.
     """
     times = [BAGGAGE_SECONDS[p.baggage_size] for p in passengers]
     if len(passengers) == 1:
         return times[0] + _GAP_SECONDS
-    return max(times) + 5 * (len(passengers) - 1) + _GAP_SECONDS
+    is_steffen_wave = all(p.group_id is None for p in passengers)
+    overhead = _WAVE_ENTRY_SECONDS if is_steffen_wave else 5
+    return max(times) + overhead * (len(passengers) - 1) + _GAP_SECONDS
 
 
 def build_schedule(
